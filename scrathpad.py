@@ -1,14 +1,4 @@
-import timeit
 
-modulus = """for x in range(0, 255):
-    if x > 127:
-        y = True
-    else:
-        y = False
-        """
-
-branching = """for x in range (0,255):
-    y = x > 127"""
-
-print(f"Modulus time = {timeit.timeit(stmt = modulus, number = 1000000)}")
-print(f"Branching time = {timeit.timeit(stmt = branching, number = 1000000)}")
+array1 = [255, 128,100, 200, 0, 0]
+binarray1 = [[(b >> i) & 1 == 1 for i in range(7, -1, -1)] for b in array1]
+print(binarray1)

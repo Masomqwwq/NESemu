@@ -2,11 +2,14 @@ from customTypes import *
 import math
 import csv
 from pathlib import Path
+import pygame as pg
+import time
 import sys
 
 class Emulation:
-    def __init__(self, filepath, debug=False):
+    def __init__(self, filepath, screen, debug=False):
         # initialize path to rom, relevant registers and flags
+        self.screen = screen
         self.debug = debug
         self.rompath = filepath
         self.pgmctr = 0x00
@@ -28,7 +31,7 @@ class Emulation:
         self.stackptr = 0xFD
         self.logger = []
         self.iter = 0
-
+        self.oplookup = {}
         # initialize ram ( I believe this will need to be randomized on startup in the future)
         self.addSpace = [0xff] * 0x8000
         # Initialize rom
@@ -40,16 +43,57 @@ class Emulation:
             self.pgmctr = 0x8000
         else:
             self.pgmctr = self.addSpace[0xFFFC] + self.addSpace[0xFFFD] * 256
+        self.sprites = self.makesprites()
+
+    def makesprites(self):
+        self.chardata = self.addSpace[0x8000: 0x10000]
+        spritesheet = []
+        # TODO This is horrible, consider implementing numpy bitarrays to improve performance or just refactoring this god awful code
+        # Populate sprite-sheet by parsing character data sheets and assigning all pixels a value of 0 - 3 to determine which item should be used from the palette
+        for spriteset in range(0, len(self.chardata), 16):
+            spritedata = self.chardata[spriteset:spriteset+16]
+            palette1 = []
+            palette2 = []
+            sprite = []
+            for row in range(8):
+                rowout = []
+                palette1.append([(spritedata[row] >> i) & 1 == 1 for i in range(8)])
+                palette2.append([(spritedata[row+8] >> i) & 1 == 1 for i in range(8)])
+                for element in range(8):
+                    rowout.append(palette1[row][element] + palette2[row][element]*2)
+                sprite.append(rowout)
+            spritesheet.append(sprite)
+        return spritesheet
+
+    def draw(self):
+        # TODO Import palette data to pass onto pixel constructor
+        palette = [(255, 255, 255), (170, 170, 170), (85, 85, 85), (0, 0, 0)]
+        for display in range(0, 2):
+            for spritenum in range(len(self.sprites)):
+                spritedata = self.sprites[spritenum]
+                for y in range(8):
+                    for x in range(8):
+                        calcx = math.floor((spritenum-1)/16)*8+x+(display*128)
+                        calcy = (spritenum % 16-1)*8+y
+                        self.screen.set_at((calcx, calcy), palette[spritedata[y][x]])
+
+        pg.display.flip()
 
     def run_emu(self, log): # Primary event loop
         logger = csv.writer(log)
         logger.writerow(["Program Counter", "Op", "Reg A", "Reg X", "Reg Y", "Fstring"])
         self.flag_InterruptDisable = True
         while not self.halt:
+            self.draw()
+            time.sleep(9)
             self.opcode = self.addSpace[self.pgmctr]
-            logger.writerow([hex(self.pgmctr), hex(self.opcode), hex(self.regA), hex(self.regX), hex(self.regY), self.build_Fstring(), self.addSpace[0:0x0C]])
+            logger.writerow([hex(self.pgmctr), hex(self.opcode), self.opcode, hex(self.regA), hex(self.regX), hex(self.regY), self.build_Fstring(), self.addSpace[0:0x0C]])
+            #TODO: Implement op lookup table for more readable logging
             self.pgmctr += 0x1
             self.op()
+            while self.cycles:
+                self.draw()
+                self.cycles -= 1
 
     def build_Fstring(self):
         base = ""
@@ -113,7 +157,7 @@ class Emulation:
         tlow = self.read()
         self.pgmctr += 1
         return tlow + self.read() * 256
-    
+
     def get_abs_indx(self, addr, index):
         self.cycles += addr % 256 + index > 255
         return addr + index
@@ -401,6 +445,7 @@ class Emulation:
                 self.cycles += 3; return
                 # </editor-fold>
                 # TODO: Probably more efficient to do this as subtraction in a while loop?
+                # TODO: Might be better to represent flag state as a byte rather than converting when necessary?
             case 0x29:
                 # <editor-fold desc="AND w/ Accumulator Immediate">
                 self.regA &= self.read()
