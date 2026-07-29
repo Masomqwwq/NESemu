@@ -5,6 +5,8 @@ from pathlib import Path
 import pygame as pg
 import time
 import sys
+from bitarray import bitarray
+from bitarray.util import int2ba, ba2int
 
 class Emulation:
     def __init__(self, filepath, screen, debug=False):
@@ -16,6 +18,9 @@ class Emulation:
         self.regA = 0x00
         self.regX = 0x00
         self.regY = 0x00
+        self.regPW = False
+        self.regPT = 0x00
+        self.regPV = 0x00
         self.opcode = 0
         self.cycles = 0
         self.halt = False
@@ -43,40 +48,33 @@ class Emulation:
             self.pgmctr = 0x8000
         else:
             self.pgmctr = self.addSpace[0xFFFC] + self.addSpace[0xFFFD] * 256
-        self.sprites = self.makesprites()
+        self.makesprites()
 
     def makesprites(self):
-        self.chardata = self.addSpace[0x8000: 0x10000]
+        self.chardata = self.addSpace[0x10000: 0x12000]
         spritesheet = []
         # TODO This is horrible, consider implementing numpy bitarrays to improve performance or just refactoring this god awful code
         # Populate sprite-sheet by parsing character data sheets and assigning all pixels a value of 0 - 3 to determine which item should be used from the palette
-        for spriteset in range(0, len(self.chardata), 16):
-            spritedata = self.chardata[spriteset:spriteset+16]
-            palette1 = []
-            palette2 = []
-            sprite = []
-            for row in range(8):
-                rowout = []
-                palette1.append([(spritedata[row] >> i) & 1 == 1 for i in range(8)])
-                palette2.append([(spritedata[row+8] >> i) & 1 == 1 for i in range(8)])
-                for element in range(8):
-                    rowout.append(palette1[row][element] + palette2[row][element]*2)
-                sprite.append(rowout)
+        for spritepointer in range(0, len(self.chardata), 16):
+            spritedata = self.chardata[spritepointer:spritepointer+16]
+            bp1 = list(map(lambda x: int2ba(x,8), spritedata[0:8]))
+            bp2 = list(map(lambda x: int2ba(x,8), spritedata[8:16]))
+            sprite = [list(map(lambda x: x[0] + x[1]*2, zip(bp1[y], bp2[y]))) for y in range(8)]   
             spritesheet.append(sprite)
-        return spritesheet
+        self.sprites = spritesheet
 
     def draw(self):
         # TODO Import palette data to pass onto pixel constructor
-        palette = [(255, 255, 255), (170, 170, 170), (85, 85, 85), (0, 0, 0)]
-        for display in range(0, 2):
-            for spritenum in range(len(self.sprites)):
-                spritedata = self.sprites[spritenum]
-                for y in range(8):
-                    for x in range(8):
-                        calcx = math.floor((spritenum-1)/16)*8+x+(display*128)
-                        calcy = (spritenum % 16-1)*8+y
-                        self.screen.set_at((calcx, calcy), palette[spritedata[y][x]])
-
+        palette = [(0, 0, 0),(85, 85, 85), (170, 170, 170),(255, 255, 255)]
+        for table in range(0, 2):
+            for row in range(0,16):
+                for col in range(0,16):
+                    for y in range (0,8):
+                        for x in range (0,8):
+                            spritedata = self.sprites[table*256+col*16+row]
+                            calcx = table*128 + row*8 + x
+                            calcy = col*8 + y
+                            self.screen.set_at((calcx, calcy), palette[spritedata[y][x]])
         pg.display.flip()
 
     def run_emu(self, log): # Primary event loop
@@ -84,8 +82,9 @@ class Emulation:
         logger.writerow(["Program Counter", "Op", "Reg A", "Reg X", "Reg Y", "Fstring"])
         self.flag_InterruptDisable = True
         while not self.halt:
+            if self.debug:
+                time.sleep(0.2)
             self.draw()
-            time.sleep(9)
             self.opcode = self.addSpace[self.pgmctr]
             logger.writerow([hex(self.pgmctr), hex(self.opcode), self.opcode, hex(self.regA), hex(self.regX), hex(self.regY), self.build_Fstring(), self.addSpace[0:0x0C]])
             #TODO: Implement op lookup table for more readable logging
@@ -94,6 +93,7 @@ class Emulation:
             while self.cycles:
                 self.draw()
                 self.cycles -= 1
+        return False
 
     def build_Fstring(self):
         base = ""
@@ -142,14 +142,41 @@ class Emulation:
             address -= 0x800
         return self.addSpace[address]
 
-    def write(self, address, data): # Write data to address in memory, no default here
-        if address > 0x800:
-            raise MemoryError(f"Attempted to write to invalid memory address {address} at line {self.pgmctr}")
+    def write(self, address, data): # Write data to address in memory
+        if address < 0x2000:
+            self.addSpace[address & 0x7FF] = int(data)
+        elif address < 0x4000:
+            address &= 2007
+            match address:
+                case 0x2000:
+                    pass
+                case 0x2001:
+                    pass
+                case 0x2002:
+                    pass
+                case 0x2003:
+                    pass
+                case 0x2004:
+                    pass
+                case 0x2005:
+                    pass
+                case 0x2006:
+                    if not self.regPW:
+                        ppuaddr = bitarray(data*16)
+                    else:
+                        ppuaddr += data
+                        regPT = ppuaddr
+                        regPV = ppuaddr
+                    self.regPW != self.regPW
+                case 0x2007:
+                    pass
         else:
-            self.addSpace[address] = int(data)
+            raise MemoryError(f"Attemplted to reference out of scope address {address}")
+            self.halt = True
+        
+        
 
     def set_flags(self, value, negative=True, zero=True): # Set relevant flags based on passed value.
-        # I would like to make this function more comprehensive with the option to opt in and out of certain flags but I'm not sure if that's necessary
         self.flag_Negative = value > 127 and negative
         self.flag_Zero = value == 0 and zero
 
@@ -777,7 +804,6 @@ class Emulation:
             case 0x81:
                 # <editor-fold desc="Store Accumulator Indirect, X Indexed (Inclusive Indirect)">
                 addr = self.get_incl_indr()
-                print(hex(addr), hex(self.regA))
                 self.write(self.read(addr),self.regA)
                 self.cycles += 6
                 # </editor-fold>

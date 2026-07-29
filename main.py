@@ -12,12 +12,12 @@ import time
 def main():
     # Pygame Initialization
     pg.init()
-    screen = pg.display.set_mode((256, 128))
+    screen = pg.display.set_mode((256, 128), pg.SCALED)
     clock = pg.time.Clock()
     running = True
     dt = 0
     # TODO Varialbe rom selection on startup
-    rompath = "7_Graphics.nes"
+    rompath = "smb.nes"
     # TODO Hardcoded debug mode selectable on startup
     emu_instance = Emulation(rompath, screen)
     # TODO Deprecate timing for pg Clock?
@@ -34,13 +34,14 @@ def main():
     # primary loop
     while running:
         with logfile.open("w", newline="") as log:
-            emu_instance.run_emu(log)
+            running = emu_instance.run_emu(log)
             toprint = []
             for value in emu_instance.addSpace[0x10:0x1D]:
                 toprint.append(value)
             output = list(map(hex, toprint))
             print(output)
             pass
+    
 
 
 if __name__ == '__main__':

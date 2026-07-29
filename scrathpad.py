@@ -1,4 +1,17 @@
+from bitarray import bitarray
 
-array1 = [255, 128,100, 200, 0, 0]
-binarray1 = [[(b >> i) & 1 == 1 for i in range(7, -1, -1)] for b in array1]
-print(binarray1)
+regPT = 0
+regPW = False
+tempvram = bitarray(0)
+def test(data):
+    if not regPW:
+        tempvram = bitarray(data*16)
+    else:
+        ppuaddr += data + tempvram
+        regPT = ppuaddr
+    print(regPT)
+    regPW != regPW
+
+test(0x1001)
+test(0x0110)
+print(regPT)
