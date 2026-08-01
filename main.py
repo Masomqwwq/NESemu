@@ -4,7 +4,7 @@ import datetime
 from pathlib import Path
 import pygame as pg
 import time
-
+import cProfile
 
 
 # Using pathlib for more robust path handling
@@ -19,7 +19,7 @@ def main():
     # TODO Varialbe rom selection on startup
     rompath = "smb.nes"
     # TODO Hardcoded debug mode selectable on startup
-    emu_instance = Emulation(rompath, screen)
+    emu_instance = Emulation(rompath, screen, delay = 0.1)
     # TODO Deprecate timing for pg Clock?
     timenow = datetime.datetime.now()
     timeform = "%Y-%m-%d.%H.%M.%S"
@@ -35,12 +35,6 @@ def main():
     while running:
         with logfile.open("w", newline="") as log:
             running = emu_instance.run_emu(log)
-            toprint = []
-            for value in emu_instance.addSpace[0x10:0x1D]:
-                toprint.append(value)
-            output = list(map(hex, toprint))
-            print(output)
-            pass
     
 
 

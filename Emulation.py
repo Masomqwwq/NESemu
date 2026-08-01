@@ -7,14 +7,14 @@ import time
 import sys
 from bitarray import bitarray
 from bitarray.util import int2ba, ba2int
+import numpy as np
 
 class Emulation:
-    def __init__(self, filepath, screen, debug=False):
+    def __init__(self, filepath, screen, pgmctr=0, delay = 0):
         # initialize path to rom, relevant registers and flags
         self.screen = screen
-        self.debug = debug
         self.rompath = filepath
-        self.pgmctr = 0x00
+        self.delay = delay
         self.regA = 0x00
         self.regX = 0x00
         self.regY = 0x00
@@ -27,6 +27,7 @@ class Emulation:
         # Treating the flags as components of a byte might increase performance when it comes to pushing and pulling flags
         # I also think it would tank performance in a lot of other places where a simple boolean check is replaced with modulus math
         # There might be some good compromise, but I don't think there are major gains to be had here?
+        # TODO: Future me here, bitarrays are awesome and a boolean check can be flagarray[x] so yeah definitely worht looking into
         self.flag_Carry = False
         self.flag_Zero = False
         self.flag_InterruptDisable = False
@@ -38,28 +39,33 @@ class Emulation:
         self.iter = 0
         self.oplookup = {}
         # initialize ram ( I believe this will need to be randomized on startup in the future)
-        self.addSpace = [0xff] * 0x8000
-        # Initialize rom
+        self.addSpace = np.zeros(0xFFFF, dtype=np.uint8)
+        # Initialize rom and append to addressable space
+        tempread = []
         with open(self.rompath, "rb") as data:
             self.header = (chunk for chunk in data.read(0x10))
-            self.addSpace += (chunk for chunk in data.read())
+            tempread += (chunk for chunk in data.read())
+            self.addSpace[8001:] = np.array(tempread, dtype=np.uint8)
+        # Initalize PPU Addressable space then write CHR ROM to it
+        self.vaddSpace = np.zeros(0x3FFF, dtype=np.uint8)
+        self.vaddSpace[:0x1FFF] = np.frombuffer(self.addSpace[0x10000:0x11FFF], dtype=np.uint8)
         # Move the Program Counter to correct space (Little Endian), or custom address if debug is active
-        if debug:
-            self.pgmctr = 0x8000
+        if pgmctr:
+            self.pgmctr = pgmctr
         else:
             self.pgmctr = self.addSpace[0xFFFC] + self.addSpace[0xFFFD] * 256
-        self.makesprites()
+            self.makesprites()
 
     def makesprites(self):
-        self.chardata = self.addSpace[0x10000: 0x12000]
+        #TODO Convert to pg biteplanes instead of nested lists
+        chardata = self.vaddSPace[:0x1FFF]
         spritesheet = []
-        # TODO This is horrible, consider implementing numpy bitarrays to improve performance or just refactoring this god awful code
-        # Populate sprite-sheet by parsing character data sheets and assigning all pixels a value of 0 - 3 to determine which item should be used from the palette
+        # Ingest spritedate as 2 bitplanes, combine the bitmaps with bp2 having a value of 2 to give palette range between 0-3
         for spritepointer in range(0, len(self.chardata), 16):
             spritedata = self.chardata[spritepointer:spritepointer+16]
             bp1 = list(map(lambda x: int2ba(x,8), spritedata[0:8]))
             bp2 = list(map(lambda x: int2ba(x,8), spritedata[8:16]))
-            sprite = [list(map(lambda x: x[0] + x[1]*2, zip(bp1[y], bp2[y]))) for y in range(8)]   
+            sprite = [list(map(lambda x: int2ba(x[0] + x[1]*2), zip(bp1[y], bp2[y]))) for y in range(8)]
             spritesheet.append(sprite)
         self.sprites = spritesheet
 
@@ -74,7 +80,7 @@ class Emulation:
                             spritedata = self.sprites[table*256+col*16+row]
                             calcx = table*128 + row*8 + x
                             calcy = col*8 + y
-                            self.screen.set_at((calcx, calcy), palette[spritedata[y][x]])
+                            self.screen.set_at((calcx, calcy), palette[ba2int(spritedata[y][x])])
         pg.display.flip()
 
     def run_emu(self, log): # Primary event loop
@@ -82,8 +88,8 @@ class Emulation:
         logger.writerow(["Program Counter", "Op", "Reg A", "Reg X", "Reg Y", "Fstring"])
         self.flag_InterruptDisable = True
         while not self.halt:
-            if self.debug:
-                time.sleep(0.2)
+            if self.delay:
+                time.sleep(self.delay)
             self.draw()
             self.opcode = self.addSpace[self.pgmctr]
             logger.writerow([hex(self.pgmctr), hex(self.opcode), self.opcode, hex(self.regA), hex(self.regX), hex(self.regY), self.build_Fstring(), self.addSpace[0:0x0C]])
@@ -162,14 +168,27 @@ class Emulation:
                     pass
                 case 0x2006:
                     if not self.regPW:
-                        ppuaddr = bitarray(data*16)
+                        # First write to 2006 is big endian adress
+                        ppuaddr = data*16
                     else:
                         ppuaddr += data
                         regPT = ppuaddr
                         regPV = ppuaddr
-                    self.regPW != self.regPW
+                    self.regPW = not self.regPW
                 case 0x2007:
-                    pass
+                    if regPV < 0x2000:
+                        # Write to Pattern Table if
+                        if not self.header[5]:
+                            pass
+                            # I AM HERE, need to refactor the way I handle CHRData and sprite generation
+                        pass
+                    elif regPV < 0x3F00:
+                        # Write to Nametables
+                        pass
+                    else:
+                        # Write to Palette RAM
+                        pass
+
         else:
             raise MemoryError(f"Attemplted to reference out of scope address {address}")
             self.halt = True
@@ -294,9 +313,10 @@ class Emulation:
 
         match self.opcode:
             case 0x00:
-                # <editor-fold desc="Break">
+                #region Break
                 self.pgmctr += 1
                 self.push(math.floor(self.pgmctr / 256)); self.push(self.pgmctr % 256)
+                #TODO: B I T A R R A Y T H I S G A R B A G E
                 flags = self.flag_Carry
                 flags += self.flag_Zero * 2
                 flags += self.flag_InterruptDisable * 4
@@ -310,32 +330,32 @@ class Emulation:
                 self.pgmctr = tlow + thigh * 256
                 self.cycles += 7
                 return
-                # </editor-fold>
+                #endregion
             case 0x01:
-                # <editor-fold desc="OR w/ Accumulator, Indirect X (Inclusive Indirect)">
+                #region OR w/ Accumulator, Indirect X (Inclusive Indirect)
                 addr = self.get_incl_indr()
                 self.regA |= self.read(addr)
                 self.set_flags(self.regA)
                 self.cycles += 6
-                # </editor-fold>
+                #endregion
             case 0x02:
-                # <editor-fold desc="Halt">
+                    #region Halt
                 self.halt = True
-                # </editor-fold>
+                #endregion
             case 0x05:
-                # <editor-fold desc="OR w/ Accumulator Zero Page">
+                #region OR w/ Accumulator Zero Page
                 addr = self.read()
                 self.regA |= self.read(addr)
                 self.set_flags(self.regA); self.cycles += 3
-                # </editor-fold>
+                #endregion
             case 0x06:
-                # <editor-fold desc="Arithmetic Shift Left Zero Page">
+                #region Arithmetic Shift Left Zero Page
                 addr = self.read()
                 self.write(addr, self.asl(self.read(addr)))
                 self.cycles = 5
-                # </editor-fold>
+                #endregion
             case 0x08:
-                # <editor-fold desc="Push Flags">
+                #region Push Flags
                 flagbyte = 48
                 if self.flag_Carry:
                     flagbyte += 1
@@ -350,29 +370,29 @@ class Emulation:
                 if self.flag_Negative:
                     flagbyte += 128
                 self.push(flagbyte); self.cycles += 3; return
-                # </editor-fold>
+                #endregion
             case 0x09:
-                # <editor-fold desc="OR w/ Accumulator Immediate">
+                #region OR w/ Accumulator Immediate
                 self.regA |= self.read()
                 self.set_flags(self.regA); self.cycles += 2
-                # </editor-fold>
+                #endregion
             case 0x0D:
-                # <editor-fold desc="OR w/ Accumulator Absolute">
+                #region OR w/ Accumulator Absolute
                 self.regA |= self.read(self.get_abs())
                 self.set_flags(self.regA); self.cycles += 4
-                # </editor-fold>
+                #endregion
             case 0x0A:
-                # <editor-fold desc="Arithmetic Shift Left Accumulator">
+                #region Arithmetic Shift Left Accumulator
                 self.regA = self.asl(self.regA)
                 self.cycles = 2; return
-                # </editor-fold>
+                #endregion
             case 0x0E:
-                # <editor-fold desc="Arithmetic Shift Left Absolute">
+                #region Arithmetic Shift Left Absolute
                 addr = self.get_abs()
                 self.write(addr, self.asl(self.read(addr))); self.cycles += 6
-                # </editor-fold>
+                #endregion
             case 0x10:
-                # <editor-fold desc="Branch on Plus">
+                #region Branch on Plus
                 if not self.flag_Negative:
                     signedval = signed8(self.read())
                     temppg = self.pgmctr
@@ -381,85 +401,85 @@ class Emulation:
                         self.cycles += 1  # Branch takes extra cycle if crossing page boundary
                     self.cycles += 1  # Takes 1 additional cycles if nonzero
                 self.cycles += 2  # Takes 2 cycles no matter what
-                # </editor-fold>
+                #endregion
             # TODO: Refactor Branching to use get_abs_indx()
             case 0x11:
-                # <editor-fold desc="OR w/ Accumulator Indirect, Y Indexed (Exclusive Indirect)">
+                #region OR w/ Accumulator Indirect, Y Indexed (Exclusive Indirect)
                 addr, addcycle = self.get_excl_indr()
                 self.regA |= self.read(addr)
                 self.cycles += addcycle + 5
                 self.set_flags(self.regA)
-                # </editor-fold>
+                #endregion
             case 0x15:
-                # <editor-fold desc="OR w/ Accumulator Zero Page, X Indexed">
+                #region OR w/ Accumulator Zero Page, X Indexed
                 addr = (self.read() + self.regX) % 256
                 self.regA |= self.read(addr)
                 self.set_flags(self.regA); self.cycles += 4
-                # </editor-fold>
+                #endregion
             case 0x16:
-                # <editor-fold desc="Arithmetic Shift Left Zero Page, X Indexed">
+                #region Arithmetic Shift Left Zero Page, X Indexed
                 addr = (self.read() + self.regX) % 256
                 self.write(addr, self.asl(self.read(addr))); self.cycles += 6
-                # </editor-fold>
+                #endregion
             case 0x18:
-                # <editor-fold desc="Clear Carry">
+                #region Clear Carry
                 self.flag_Carry = False; self.cycles += 2
                 return
-                # </editor-fold>
+                #endregion
             case 0x19:
-                # <editor-fold desc="OR w/ Accumulator Absolute, Y Index">
+                #region OR w/ Accumulator Absolute, Y Index
                 addr = self.get_abs_indx(self.get_abs(), self.regY)
                 self.regA |= self.read(addr)
                 self.set_flags(self.regA)
                 self.cycles += 4
-                # </editor-fold>
+                #endregion
             case 0x1D:
-                # <editor-fold desc="OR w/ Accumulator Absolute, X Indexed">
+                #region OR w/ Accumulator Absolute, X Indexed
                 addr = self.get_abs_indx(self.get_abs(), self.regX)
                 self.regA |= self.read(addr)
                 self.set_flags(self.regA)
                 self.cycles += 4
-                # </editor-fold>
+                #endregion
             case 0x1E:
-                # <editor-fold desc="Arithmetic Shift Left Absolute, X Indexed">
+                #region Arithmetic Shift Left Absolute, X Indexed
                 addr = self.get_abs() + self.regX
                 self.write(addr, self.asl(self.read(addr))); self.cycles += 7
-                # </editor-fold>
+                #endregion
             case 0x20:
-                # <editor-fold desc="Jump to Subroutine">
+                #region Jump to Subroutine
                 tlow = self.read(); self.pgmctr += 1
                 thigh = self.read()
                 self.push(math.floor(self.pgmctr/256)); self.push(self.pgmctr % 256)
                 self.pgmctr = (tlow+thigh*256); self.cycles += 6
                 return # prevent auto increment to pgmctr since we just set it
-                # </editor-fold>
+                #endregion
             case 0x21:
-                # <editor-fold desc="AND w/ Accumulator Indirect, X Indexed (Inclusive Indirect)">
+                #region AND w/ Accumulator Indirect, X Indexed (Inclusive Indirect)
                 addr = self.get_incl_indr()
                 self.regA &= self.read(addr)
                 self.set_flags(self.regA)
                 self.cycles += 6
-                # </editor-fold>
+                #endregion
             case 0x24:
-                # <editor-fold desc="test Bit Zero Page">
+                #region test Bit Zero Page
                 addr = self.read()
                 self.bit(self.read(addr))
                 self.cycles += 3
-                # </editor-fold>
+                #endregion
             case 0x25:
-                # <editor-fold desc="AND w/ Accumulator Zero Page">
+                #region AND w/ Accumulator Zero Page
                 addr = self.read()
                 self.regA &= self.read(addr)
                 self.set_flags(self.regA)
                 self.cycles += 3
-                # </editor-fold>
+                #endregion
             case 0x26:
-                # <editor-fold desc="Rotate Left Zero Page">
+                #region Rotate Left Zero Page
                 addr = self.read()
                 self.write(addr, self.rol(self.read(addr))); self.cycles += 5
-                # </editor-fold>
+                #endregion
             case 0x28:
-                # <editor-fold desc="Pull Flags">
+                #region Pull Flags
                 flags = bin(self.pull())[2:]
                 while len(flags) < 8:
                     flags = "0" + flags
@@ -470,41 +490,42 @@ class Emulation:
                 self.flag_Overflow = flags[1] == "1"
                 self.flag_Negative = flags[0] == "1"
                 self.cycles += 3; return
-                # </editor-fold>
+                #endregion
                 # TODO: Probably more efficient to do this as subtraction in a while loop?
                 # TODO: Might be better to represent flag state as a byte rather than converting when necessary?
+                # TODO: Reviewing code, yet another case of I should use bitarrays here
             case 0x29:
-                # <editor-fold desc="AND w/ Accumulator Immediate">
+                #region AND w/ Accumulator Immediate
                 self.regA &= self.read()
                 self.set_flags(self.regA)
                 self.cycles += 2
-                # </editor-fold>
+                #endregion
             case 0x2A:
-                # <editor-fold desc="Rotate Left Accumulator">
+                #region Rotate Left Accumulator
                 self.regA = self.rol(self.regA)
                 self.cycles += 2; return
-                # </editor-fold>
+                #endregion
             case 0x2C:
-                # <editor-fold desc="test Bit Absolute">
+                #region test Bit Absolute
                 addr = self.get_abs()
                 self.bit(self.read(addr))
                 self.cycles += 4
-                # </editor-fold>
+                #endregion
             case 0x2D:
-                # <editor-fold desc="AND w/ Accumulator Absolute">
+                #region AND w/ Accumulator Absolute
                 addr = self.get_abs()
                 self.regA &= self.read(addr)
                 self.set_flags(self.regA)
                 self.cycles += 4
-                # </editor-fold>
+                #endregion
             case 0x2E:
-                # <editor-fold desc="Rotate Left Absolute">
+                #region Rotate Left Absolute
                 addr = self.get_abs()
                 self.write(addr, self.rol(self.read(addr)))
                 self.cycles += 6
-                # </editor-fold>
+                #endregion
             case 0x30:
-                # <editor-fold desc="Branch on Minus">
+                #region Branch on Minus
                 if self.flag_Negative:
                     signedval = signed8(self.read())
                     temppg = self.pgmctr
@@ -513,53 +534,53 @@ class Emulation:
                         self.cycles += 1  # Branch takes extra cycle if crossing page boundary
                     self.cycles += 1  # Takes 1 additional cycles if nonzero
                 self.cycles += 2  # Takes 2 cycles no matter what
-                # </editor-fold>
+                #endregion
             case 0x31:
-                # <editor-fold desc="AND w/ Accumulator Indirect, Y Indexed (Exclusive Indirect)">
+                #region AND w/ Accumulator Indirect, Y Indexed (Exclusive Indirect)
                 addr, addcycle = self.get_excl_indr()
                 self.regA &= self.read(addr)
                 self.set_flags(self.regA)
                 self.cycles += 5 + addcycle
-                # </editor-fold>
+                #endregion
             case 0x35:
-                # <editor-fold desc="AND w/ Accumulator Zero Page, X Indexed">
+                #region AND w/ Accumulator Zero Page, X Indexed
                 addr = (self.read() + self.regX) % 256
                 self.regA &= self.read(addr)
                 self.set_flags(self.regA)
                 self.cycles += 4
-                # </editor-fold>
+                #endregion
             case 0x36:
-                # <editor-fold desc="Rotate Left Zero Page, X Indexed">
+                #region Rotate Left Zero Page, X Indexed
                 addr = (self.read() + self.regX) % 256
                 self.write(addr, self.rol(self.read(addr))); self.cycles += 6
-                # </editor-fold>
+                #endregion
             case 0x38:
-                # <editor-fold desc="Set Carry">
+                #region Set Carry
                 self.flag_Carry = True; self.cycles += 2
                 return
-                # </editor-fold>
+                #endregion
             case 0x39:
-                # <editor-fold desc="AND w/ Accumulator Absolute Y Indexed">
+                #region AND w/ Accumulator Absolute Y Indexed
                 addr = self.get_abs_indx(self.get_abs(), self.regY)
                 self.regA &= self.read(addr)
                 self.set_flags(self.regA)
                 self.cycles += 4
-                # </editor-fold>
+                #endregion
             case 0x3D:
-                # <editor-fold desc="AND w/ Accumulator Absolute X Indexed">
+                #region AND w/ Accumulator Absolute X Indexed
                 addr = self.get_abs_indx(self.get_abs(), self.regX)
                 self.regA &= self.read(addr)
                 self.set_flags(self.regA)
                 self.cycles += 4
-                # </editor-fold>
+                #endregion
             case 0x3E:
-                # <editor-fold desc="Rotate Left Absolute, X Indexed">
+                #region Rotate Left Absolute, X Indexed
                 addr = self.get_abs_indx(self.get_abs(), self.regX) # Add cycle if page boundary crossed
                 self.write(addr, self.rol(self.read(addr)))
                 self.cycles += 7
-                # </editor-fold>
+                #endregion
             case 0x40:
-                # <editor-fold desc="Return from Interrupt">
+                #region Return from Interrupt
                 flags = self.pull()
                 tlow = self.pull(); thigh = self.pull()
                 self.pgmctr = tlow + thigh * 256
@@ -575,65 +596,65 @@ class Emulation:
                 self.flag_Carry = flags % 2 == 1
                 self.cycles += 7
                 return
-                # </editor-fold>
+                #endregion
             case 0x41:
-                # <editor-fold desc="EOR w/ Accumulator Indirect, X Indexed (Inclusive Indirect)">
+                #region EOR w/ Accumulator Indirect, X Indexed (Inclusive Indirect)
                 addr = self.get_incl_indr()
                 self.regA ^= self.read(addr)
                 self.set_flags(self.regA)
                 self.cycles += 6
-                # </editor-fold>
+                #endregion
             case 0x45:
-                # <editor-fold desc="EOR w/ Accumulator Zero Page">
+                #region EOR w/ Accumulator Zero Page
                 addr = self.read()
                 self.regA ^= self.read(addr)
                 self.set_flags(self.regA)
                 self.cycles += 3
-                # </editor-fold>
+                #endregion
             case 0x46:
-                # <editor-fold desc="Logical Shift Right Zero Page">
+                #region Logical Shift Right Zero Page
                 addr = self.read()
                 self.write(addr, self.lsr(self.read(addr)))
                 self.cycles += 5
-                # </editor-fold>
+                #endregion
             case 0x48:
-                # <editor-fold desc="Push Accumulator">
+                #region Push Accumulator
                 self.push(self.regA); self.cycles += 3
                 return
-                # </editor-fold>
+                #endregion
             case 0x49:
-                # <editor-fold desc="EOR w/ Accumulator Immediate">
+                #region EOR w/ Accumulator Immediate
                 self.regA ^= self.read()
                 self.set_flags(self.regA)
                 self.cycles += 2
-                # </editor-fold>
+                #endregion
             case 0x4A:
-                # <editor-fold desc="Logical Shift Right Accumulator">
+                #region Logical Shift Right Accumulator
                 self.regA = self.lsr(self.regA)
                 self.cycles += 2; return
-                # </editor-fold>
+                #endregion
             case 0x4C:
-                # <editor-fold desc="Jump">
+                #region Jump
                 tlow = self.read(); self.pgmctr += 1
                 thigh = self.read()
                 self.pgmctr = (tlow + thigh * 256); self.cycles += 3
                 return # prevent auto increment to pgmctr since we just set it
-                # </editor-fold>
+                #endregion
             case 0x4D:
-                # <editor-fold desc="EOR w/ Accumulator Absolute">
+                #region EOR w/ Accumulator Absolute
                 addr = self.get_abs()
                 self.regA ^= self.read(addr)
                 self.set_flags(self.regA)
                 self.cycles += 4
-                # </editor-fold>
+                #endregion
             case 0x4E:
-                # <editor-fold desc="Logical Shift Right Absolute">
+                #region Logical Shift Right Absolute
                 addr = self.get_abs()
                 self.write(addr, self.rol(self.read(addr)))
                 self.cycles += 6
-                # </editor-fold>
+                #endregion
             case 0x50:
-                # <editor-fold desc="Branch on Not Overflow">
+                #region Branch on Not Overflow
                 if not self.flag_Overflow:
                     signedval = signed8(self.read())
                     temppg = self.pgmctr
@@ -642,91 +663,91 @@ class Emulation:
                         self.cycles += 1  # Branch takes extra cycle if crossing page boundary
                     self.cycles += 1  # Takes 1 additional cycles if nonzero
                 self.cycles += 2  # Takes 2 cycles no matter what
-                # </editor-fold>
+                #endregion
             case 0x51:
-                # <editor-fold desc="EOR w/ Accumulator Indirect, Y Indexed (Exclusive Indirect)">
+                #region EOR w/ Accumulator Indirect, Y Indexed (Exclusive Indirect)
                 addr, addcycle = self.get_excl_indr()
                 self.regA ^= self.read(addr)
                 self.set_flags(self.regA)
                 self.cycles += 5 + addcycle
-                # </editor-fold>
+                #endregion
             case 0x55:
-                # <editor-fold desc="EOR w/ Accumulator Zero Page, X Indexed">
+                #region EOR w/ Accumulator Zero Page, X Indexed
                 addr = self.read() + self.regX
                 self.regA ^= self.read(addr)
                 self.set_flags(self.regA)
                 self.cycles += 4
-                # </editor-fold>
+                #endregion
             case 0x56:
-                # <editor-fold desc="Logical Shift Right Zero Page, X Indexed">
+                #region Logical Shift Right Zero Page, X Indexed
                 addr = (self.read() + self.regX) % 256
                 self.write(addr, self.lsr(self.read(addr)))
-                # </editor-fold>
+                #endregion
             case 0x58:
-                # <editor-fold desc="Clear Interrupt-Disable">
+                #region Clear Interrupt-Disable
                 self.flag_InterruptDisable = False; self.cycles += 2
                 return
-                # </editor-fold>
+                #endregion
             case 0x59:
-                # <editor-fold desc="EOR w/ Accumulator Absolute Y Indexed">
+                #region EOR w/ Accumulator Absolute Y Indexed
                 addr = self.get_abs_indx(self.get_abs(), self.regY)  # Add cycle if page boundary crossed
                 self.regA ^= self.read(addr)
                 self.set_flags(self.regA)
                 self.cycles += 4
-                # </editor-fold>
+                #endregion
             case 0x5D:
-                # <editor-fold desc="EOR w/ Accumulator Absolute X Indexed">
+                #region EOR w/ Accumulator Absolute X Indexed
                 addr = self.get_abs_indx(self.get_abs(), self.regX)  # Add cycle if page boundary crossed
                 self.regA ^= self.read(addr)
                 self.set_flags(self.regA)
                 self.cycles += 4
-                # </editor-fold>
+                #endregion
             case 0x5E:
-                # <editor-fold desc="Logical Shift Right Absolute, X Indexed">
+                #region Logical Shift Right Absolute, X Indexed
                 addr = self.get_abs_indx(self.get_abs(), self.regX)  # Add cycle if page boundary crossed
                 self.write(addr, self.lsr(self.read(addr))); self.cycles += 7
-                # </editor-fold>
+                #endregion
             case 0x60:
-                # <editor-fold desc="Return from Subroutine">
+                #region Return from Subroutine
                 tlow = self.pull()
                 self.pgmctr = (tlow+self.pull()*256); self.cycles += 6
-                # </editor-fold>
+                #endregion
             case 0x61:
-                # <editor-fold desc="Add with Carry Indirect, X Indexed (Inclusive Indirect)">
+                #region Add with Carry Indirect, X Indexed (Inclusive Indirect)
                 addr = self.get_incl_indr()
                 self.regA = self.adc(self.read(addr), self.regA)
                 self.cycles += 6
-                # </editor-fold>
+                #endregion
             case 0x65:
-                # <editor-fold desc="Add to Accumulator Zero Page">
+                #region Add to Accumulator Zero Page
                 addr = self.read()
                 self.regA = self.adc(self.regA, self.read(addr))
                 self.cycles += 3
-                # </editor-fold>
+                #endregion
             case 0x66:
-                # <editor-fold desc="Rotate Right Zero Page">
+                #region Rotate Right Zero Page
                 addr = self.read()
                 self.write(addr, self.ror(self.read(addr))); self.cycles += 5
-                # </editor-fold>
+                #endregion
             case 0x68:
-                # <editor-fold desc="Pull Accumulator">
+                #region Pull Accumulator
                 self.regA = self.pull(); self.cycles += 4
                 self.set_flags(self.regA)
                 return
-                # </editor-fold>
+                #endregion
             case 0x69:
-                # <editor-fold desc="Add to Accumulator Immediate">
+                #region Add to Accumulator Immediate
                 self.regA = self.adc(self.regA, self.read())
                 self.cycles += 2
                 # Fun fact, the NES does not use the Decimal flag, ask me how much time I spent implementing BCD from the raw 6502 docs before coming to this realization
-                # </editor-fold>
+                #endregion
             case 0x6A:
-                # <editor-fold desc="Rotate Right Accumulator">
+                #region Rotate Right Accumulator
                 self.regA = self.ror(self.regA)
                 self.cycles += 2; return
-                # </editor-fold>
+                #endregion
             case 0x6C:
-                # <editor-fold desc="Jump to Indirect Address">
+                #region Jump to Indirect Address
                 addr = self.get_abs()
                 tlow = self.read(addr)
                 addr += 1
@@ -736,21 +757,21 @@ class Emulation:
                 self.pgmctr = tlow + thigh*256
                 self.cycles += 5
                 return
-                # </editor-fold>
+                #endregion
             case 0x6D:
-                # <editor-fold desc="Add to Accumulator Absolute">
+                #region Add to Accumulator Absolute
                 addr = self.get_abs()
                 self.regA = self.adc(self.regA, self.read(addr))
                 self.cycles += 4
-                # </editor-fold>
+                #endregion
             case 0x6E:
-                # <editor-fold desc="Rotate Right Absolute">
+                #region Rotate Right Absolute
                 addr = self.get_abs()
                 self.write(addr, self.ror(self.read(addr)))
                 self.cycles += 6
-                # </editor-fold>
+                #endregion
             case 0x70:
-                # <editor-fold desc="Branch on Overflow">
+                #region Branch on Overflow
                 if self.flag_Overflow:
                     signedval = signed8(self.read())
                     temppg = self.pgmctr
@@ -759,93 +780,93 @@ class Emulation:
                         self.cycles += 1  # Branch takes extra cycle if crossing page boundary
                     self.cycles += 1  # Takes 1 additional cycles if nonzero
                 self.cycles += 2  # Takes 2 cycles no matter what
-                # </editor-fold>
+                #endregion
             case 0x71:
-                # <editor-fold desc="Add with Carry Indirect, Y Indexed (Exclusive Indirect)">
+                #region Add with Carry Indirect, Y Indexed (Exclusive Indirect)
                 addr, addcycle = self.get_excl_indr()
                 self.regA = self.adc(self.regA, self.read(addr))
                 self.cycles += 5 + addcycle
-                # </editor-fold>
+                #endregion
             case 0x75:
-                # <editor-fold desc="Add to Accumulator Zero Page, X Indexed">
+                #region Add to Accumulator Zero Page, X Indexed
                 addr = (self.read() + self.regX) % 256
                 self.regA = self.adc(self.regA, self.read(addr))
                 self.cycles += 4
-                # </editor-fold>
+                #endregion
             case 0x76:
-                # <editor-fold desc="Rotate Right Zero Page, X Indexed">
+                #region Rotate Right Zero Page, X Indexed
                 addr = (self.read() + self.regX) % 256
                 self.write(addr, self.ror(self.read(addr)))
                 self.cycles += 6
-                # </editor-fold>
+                #endregion
             case 0x78:
-                # <editor-fold desc="Set Interrupt-Disable">
+                #region Set Interrupt-Disable
                 self.flag_InterruptDisable = True; self.cycles += 2
                 return
-                # </editor-fold>
+                #endregion
             case 0x79:
-                # <editor-fold desc="Add to Accumulator Absolute, Y Indexed">
+                #region Add to Accumulator Absolute, Y Indexed
                 addr = self.get_abs_indx(self.get_abs(), self.regY) # Add cycle if page boundary crossed
                 self.regA = self.adc(self.regA, self.read(addr + self.regY))
                 self.cycles += 4
-                # </editor-fold>
+                #endregion
             case 0x7D:
-                # <editor-fold desc="Add to Accumulator Absolute, X Indexed">
+                #region Add to Accumulator Absolute, X Indexed
                 addr = self.get_abs_indx(self.get_abs(), self.regX)  # Add cycle if page boundary crossed
                 self.regA = self.adc(self.regA, self.read(addr + self.regX))
                 self.cycles += 4
-                # </editor-fold>
+                #endregion
             case 0x7E:
-                # <editor-fold desc="Rotate Right Absolute, X Indexed">
+                #region Rotate Right Absolute, X Indexed
                 addr = self.get_abs() + self.regX # No Additional cycles when boundary crossed
                 self.write(addr, self.ror(self.read(addr)))
                 self.cycles += 7
-                # </editor-fold>
+                #endregion
             case 0x81:
-                # <editor-fold desc="Store Accumulator Indirect, X Indexed (Inclusive Indirect)">
+                #region Store Accumulator Indirect, X Indexed (Inclusive Indirect)
                 addr = self.get_incl_indr()
                 self.write(self.read(addr),self.regA)
                 self.cycles += 6
-                # </editor-fold>
+                #endregion
             case 0x84:
-                # <editor-fold desc="STY Zero Page">
+                #region STY Zero Page
                 self.write(self.read(), self.regY); self.cycles += 3
-                # </editor-fold>
+                #endregion
             case 0x85:
-                # <editor-fold desc="STA Zero Page">
+                #region STA Zero Page
                 self.write(self.read(), self.regA)
                 self.cycles += 3
-                # </editor-fold>
+                #endregion
             case 0x86:
-                # <editor-fold desc="STX Zero Page">
+                #region STX Zero Page
                 self.write(self.read(), self.regX); self.cycles += 3
-                # </editor-fold>
+                #endregion
             case 0x88:
-                # <editor-fold desc="Decrement Y">
+                #region Decrement Y
                 self.regY = self.dec(self.regY)
                 self.cycles += 2
                 self.set_flags(self.regY)
-                # </editor-fold>
+                #endregion
             case 0x8A:
-                # <editor-fold desc="Transfer X > A">
+                #region Transfer X > A
                 self.regA = self.regX; self.cycles += 2
                 self.set_flags(self.regA); return
-                # </editor-fold>
+                #endregion
             case 0x8C:
-                # <editor-fold desc="Store Register Y Absolute">
+                #region Store Register Y Absolute
                 self.write(self.read(self.get_abs()), self.regY); self.cycles += 4
-                # </editor-fold>
+                #endregion
             case 0x8D:
-                # <editor-fold desc="Store Register A Absolute">
+                #region Store Register A Absolute
                 self.write(self.get_abs(), self.regA)
                 self.cycles += 4
-                # </editor-fold>
+                #endregion
             case 0x8E:
-                # <editor-fold desc="Store Register X Absolute">
+                #region Store Register X Absolute
                 self.write(self.read(self.get_abs()), self.regX); self.cycles += 4
-                # </editor-fold>
+                #endregion
             case 0x90:
-                # <editor-fold desc="Branch on Not Carry">
+                #region Branch on Not Carry
                 if not self.flag_Carry:
                     signedval = signed8(self.read())
                     temppg = self.pgmctr
@@ -854,88 +875,88 @@ class Emulation:
                         self.cycles += 1  # Branch takes extra cycle if crossing page boundary
                     self.cycles += 1  # Takes 1 additional cycles if nonzero
                 self.cycles += 2  # Takes 2 cycles no matter what
-                # </editor-fold>
+                #endregion
             case 0x91:
-                # <editor-fold desc="Store Accumulator Indirect, XY Indexed (Exclusive Indirect)">
+                #region Store Accumulator Indirect, XY Indexed (Exclusive Indirect)
                 addr, addcycle = self.get_excl_indr()
                 self.write(self.read(addr), self.regA)
                 self.cycles += 6
-                # </editor-fold>
+                #endregion
             case 0x95:
-                # <editor-fold desc="STA Zero Page, X Indexed">
+                #region STA Zero Page, X Indexed
                 addr = (self.read() + self.regX) % 256
                 self.write(addr, self.regA)
                 self.cycles += 4
-                # </editor-fold>
+                #endregion
             case 0x98:
-                # <editor-fold desc="Transfer Y > A">
+                #region Transfer Y > A
                 self.regA = self.regY; self.cycles += 2
                 self.set_flags(self.regA); return
-                # </editor-fold>
+                #endregion
             case 0x99:
-                # <editor-fold desc="Store Accumulator Absolute, Y Indexed">
+                #region Store Accumulator Absolute, Y Indexed
                 addr = self.get_abs_indx(self.get_abs(), self.regX)
                 self.write(self.read(addr), self.regA)
                 self.cycles += 5
-                # </editor-fold>
+                #endregion
             case 0x9A:
-                # <editor-fold desc="Transfer X to Stack Pointer">
+                #region Transfer X to Stack Pointer
                 self.stackptr = self.regX
                 self.set_flags(self.regX)
                 self.cycles += 2
                 return
-                # </editor-fold>
+                #endregion
             case 0x9D:
-                # <editor-fold desc="Store Accumulator Absolute, X Indexed">
+                #region Store Accumulator Absolute, X Indexed
                 addr = self.get_abs_indx(self.get_abs(), self.regX)
                 self.write(addr, self.regA)
                 self.cycles += 5
-                # </editor-fold>
+                #endregion
             case 0xA0:
-                # <editor-fold desc="Load Y Immediate">
+                #region Load Y Immediate
                 self.regY = self.read(); self.cycles += 2
                 self.set_flags(self.regY)
-                # </editor-fold>
+                #endregion
             case 0xA1:
-                # <editor-fold desc="Load Accumulator Indirect, X Indexed (Inclusive Indirect)">
+                #region Load Accumulator Indirect, X Indexed (Inclusive Indirect)
                 addr = self.get_incl_indr()
                 self.regA = self.read(addr)
                 self.set_flags(self.regA)
                 self.cycles += 6
-                # </editor-fold>
+                #endregion
             case 0xA2:
-                # <editor-fold desc="Load Immediate X">
+                #region Load Immediate X
                 self.regX = self.read(); self.cycles += 2
                 self.set_flags(self.regX)
-                # </editor-fold>
+                #endregion
             case 0xA5:
-                # <editor-fold desc="Load A Zero Page">
+                #region Load A Zero Page
                 self.regA = self.read(); self.cycles += 2
                 self.set_flags(self.regA)
-                # </editor-fold>
+                #endregion
             case 0xA8:
-                # <editor-fold desc="Transfer A > Y">
+                #region Transfer A > Y
                 self.regY = self.regA; self.cycles += 2
                 self.set_flags(self.regY); return
-                # </editor-fold>
+                #endregion
             case 0xA9:
-                # <editor-fold desc="Load A Immediate">
+                #region Load A Immediate
                 self.regA = self.read(); self.cycles += 2
                 self.set_flags(self.regA)
-                # </editor-fold>
+                #endregion
             case 0xAA:
-                # <editor-fold desc="Transfer A > X">
+                #region Transfer A > X
                 self.regX = self.regA; self.cycles += 2
                 self.set_flags(self.regX); return
-                # </editor-fold>
+                #endregion
             case 0xAD:
-                # <editor-fold desc="Load A Absolute">
+                #region Load A Absolute
                 addr = self.get_abs()
                 self.regA = self.read(addr)
                 self.set_flags(self.regA); self.cycles += 4
-                # </editor-fold>
+                #endregion
             case 0xB0:
-                # <editor-fold desc="Branch on Carry">
+                #region Branch on Carry
                 if self.flag_Carry:
                     signedval = signed8(self.read())
                     temppg = self.pgmctr
@@ -944,113 +965,113 @@ class Emulation:
                         self.cycles += 1 # Branch takes extra cycle if crossing page boundary
                     self.cycles += 1 # Takes 1 additional cycles if nonzero
                 self.cycles += 2 # Takes 2 cycles no matter what
-                # </editor-fold>
+                #endregion
             case 0xB1:
-                # <editor-fold desc="Load Accumulator Indirect, Y Indexed (Exclsuive Indirect)">
+                #region Load Accumulator Indirect, Y Indexed (Exclsuive Indirect)
                 addr, addcycle = self.get_excl_indr()
                 self.regA = self.read(addr)
                 self.set_flags(self.regA)
                 self.cycles += 5 + addcycle
-                # </editor-fold>
+                #endregion
             case 0xB5:
-                # <editor-fold desc="Load Accumulator Zero Page, X Indexed">
+                #region Load Accumulator Zero Page, X Indexed
                 addr = (self.read() + self.regX) % 256
                 self.regA = self.read(addr)
                 self.set_flags(self.regA)
                 self.cycles += 4
-                # </editor-fold>
+                #endregion
             case 0xB8:
-                # <editor-fold desc="Clear Overflow">
+                #region Clear Overflow
                 self.flag_Overflow = False; self.cycles += 2
                 return
-                # </editor-fold>
+                #endregion
             case 0xB9:
-                # <editor-fold desc="Load Accumulator Absolute, Y Indexed">
+                #region Load Accumulator Absolute, Y Indexed
                 addr = self.get_abs_indx(self.get_abs(), self.regY)
                 self.regA = self.read(addr)
                 self.set_flags(self.regA)
                 self.cycles += 4
-                # </editor-fold>
+                #endregion
             case 0xBA:
-                # <editor-fold desc="Transfer Stack Pointer to X">
+                #region Transfer Stack Pointer to X
                 self.regX = self.stackptr
                 self.set_flags(self.regX)
                 self.cycles += 2
                 return
-                # </editor-fold>
+                #endregion
             case 0xBD:
-                # <editor-fold desc="Load Accumulator Absolute, X Indexed">
+                #region Load Accumulator Absolute, X Indexed
                 addr = self.get_abs_indx(self.get_abs(), self.regX)
                 self.regA = self.read(addr)
                 self.set_flags(self.regA)
                 self.cycles += 4
-                # </editor-fold>
+                #endregion
             case 0xC0:
-                # <editor-fold desc="Compare with Y Register Immediate">
+                #region Compare with Y Register Immediate
                 self.cmp(self.regY, self.read())
                 self.cycles += 2
-                # </editor-fold>
+                #endregion
             case 0xC1:
-                # <editor-fold desc="Compare with Accumulator Indirect, X Indexed (Inclusive Indirect)">
+                #region Compare with Accumulator Indirect, X Indexed (Inclusive Indirect)
                 addr = self.get_incl_indr()
                 self.cmp(self.regA, self.read(addr))
                 self.cycles += 6
-                # </editor-fold>
+                #endregion
             case 0xC4:
-                # <editor-fold desc="Compare with Y Zero Page">
+                #region Compare with Y Zero Page
                 addr = self.read()
                 self.cmp(self.regY, self.read(addr))
                 self.cycles += 3
-                # </editor-fold>
+                #endregion
             case 0xC5:
-                # <editor-fold desc="Compare with Accumulator Zero Page">
+                #region Compare with Accumulator Zero Page
                 addr = self.read()
                 self.cmp(self.regA, self.read(addr))
                 self.cycles += 3
-                # </editor-fold>
+                #endregion
             case 0xC6:
-                # <editor-fold desc="Decrement Memory Zero Page">
+                #region Decrement Memory Zero Page
                 addr = self.read()
                 self.write(addr, self.dec(self.read(addr)))
                 self.cycles += 5
-                # </editor-fold>
+                #endregion
             case 0xC8:
-                # <editor-fold desc="Increment Y">
+                #region Increment Y
                 self.regY = self.inc(self.regY)
                 self.cycles += 2; return
-                # </editor-fold>
+                #endregion
             case 0xC9:
-                # <editor-fold desc="Compare with Accumulator Immediate">
+                #region Compare with Accumulator Immediate
                 self.cmp(self.regA, self.read())
                 self.cycles += 2
-                # </editor-fold>
+                #endregion
             case 0xCA:
-                # <editor-fold desc="Decrement X">
+                #region Decrement X
                 self.regX = self.dec(self.regX)
                 self.cycles += 2
                 self.set_flags(self.regX)
                 return
-                # </editor-fold>
+                #endregion
             case 0xCC:
-                # <editor-fold desc="Compare with Y Register Absolute">
+                #region Compare with Y Register Absolute
                 addr = self.get_abs()
                 self.cmp(self.regY, self.read(addr))
                 self.cycles += 4
-                # </editor-fold>
+                #endregion
             case 0xCD:
-                # <editor-fold desc="Compare with Accumulator Absolute">
+                #region Compare with Accumulator Absolute
                 addr = self.get_abs()
                 self.cmp(self.regA, self.read(addr))
                 self.cycles += 4
-                # </editor-fold>
+                #endregion
             case 0xCE:
-                # <editor-fold desc="Decrement Memory Absolute">
+                #region Decrement Memory Absolute
                 addr = self.get_abs()
                 self.write(addr,self.dec(self.read(addr)))
                 self.cycles += 3
-                # </editor-fold>
+                #endregion
             case 0xD0:
-                # <editor-fold desc="Branch on Not Equal">
+                #region Branch on Not Equal
                 if not self.flag_Zero:
                     signedval = signed8(self.read())
                     temppg = self.pgmctr
@@ -1059,111 +1080,111 @@ class Emulation:
                         self.cycles += 1 # Branch takes extra cycle if crossing page boundary
                     self.cycles += 1 # Takes 1 additional cycles if nonzero
                 self.cycles += 2 # Takes 2 cycles no matter what
-                # </editor-fold>
+                #endregion
             case 0xD1:
-                # <editor-fold desc="Compare with Accumulator Indirect, Y Indexed (Exclusive Indirect)">
+                #region Compare with Accumulator Indirect, Y Indexed (Exclusive Indirect)
                 addr = self.get_incl_indr()
                 self.cmp(self.regA, self.read(addr))
                 self.cycles += 5
-                # </editor-fold>
+                #endregion
             case 0xD5:
-                # <editor-fold desc="Compare with Accumulator Zero Page, X Indexed">
+                #region Compare with Accumulator Zero Page, X Indexed
                 addr = (self.read() + self.regX) % 256
                 self.cmp(self.regA, self.read(addr))
                 self.cycles += 3
-                # </editor-fold>
+                #endregion
             case 0xD6:
-                # <editor-fold desc="Decrement Memory Zero Page, X Indexed">
+                #region Decrement Memory Zero Page, X Indexed
                 addr = (self.read() + self.regX) % 256
                 self.write(addr, self.dec(self.read(addr)))
                 self.cycles += 6
-                # </editor-fold>
+                #endregion
             case 0xD8:
-                # <editor-fold desc="Clear Decimal -- Not Used">
+                #region Clear Decimal -- Not Used
                 self.flag_Decimal = False; self.cycles += 2
                 return
-                # </editor-fold>
+                #endregion
             case 0xD9:
-                # <editor-fold desc="Compare with Accumulator Absolute, y Indexed">
+                #region Compare with Accumulator Absolute, y Indexed
                 addr = self.get_abs_indx(self.get_abs(), self.regY)
                 self.cmp(self.regA, self.read(addr))
                 self.cycles += 4
-                # </editor-fold>
+                #endregion
             case 0xDD:
-                # <editor-fold desc="Compare with Accumulator Absolute, X Indexed">
+                #region Compare with Accumulator Absolute, X Indexed
                 addr = self.get_abs_indx(self.get_abs(), self.regX)
                 self.cmp(self.regA, self.read(addr))
                 self.cycles += 4
-                # </editor-fold>
+                #endregion
             case 0xDE:
-                # <editor-fold desc="Decrement Memory Absolute, X Indexed">
+                #region Decrement Memory Absolute, X Indexed
                 addr = self.get_abs_indx(self.get_abs(), self.regX)
                 self.write(addr, self.dec(self.read(addr)))
                 self.write += 7
-                # </editor-fold>
+                #endregion
             case 0xE0:
-                # <editor-fold desc="Compare with X Register Immediate">
+                #region Compare with X Register Immediate
                 self.cmp(self.regX, self.read())
                 self.cycles += 2
-                # </editor-fold>
+                #endregion
             case 0xE1:
-                # <editor-fold desc="Subtract with Carry Indirect, X Indexed (Inclusive Indirect)">
+                #region Subtract with Carry Indirect, X Indexed (Inclusive Indirect)
                 addr = self.get_incl_indr()
                 self.regA = self.sbc(self.regA, self.read(addr))
                 self.cycles += 6
-                # </editor-fold>
+                #endregion
             case 0xE4:
-                # <editor-fold desc="Compare with X Register Zero Page">
+                #region Compare with X Register Zero Page
                 addr = self.read()
                 self.cmp(self.regX, self.read(addr))
                 self.cycles += 3
-                # </editor-fold>
+                #endregion
             case 0xE5:
-                # <editor-fold desc="Subtract with Carry Zero Page">
+                #region Subtract with Carry Zero Page
                 addr = self.read()
                 self.regA = self.sbc(self.regA, self.read(addr))
                 self.cycles += 3
-                # </editor-fold>
+                #endregion
             case 0xE6:
-                # <editor-fold desc="Increment Memory Zero page">
+                #region Increment Memory Zero page
                 addr = self.read()
                 self.write(addr, self.inc(self.read(addr)))
                 self.cycles += 5
-                # </editor-fold>
+                #endregion
             case 0xE8:
-                # <editor-fold desc="Increment X">
+                #region Increment X
                 self.regX = self.inc(self.regX)
                 self.cycles += 2; return
-                # </editor-fold>
+                #endregion
             case 0xE9:
-                # <editor-fold desc="Subtract with Carry Immediate">
+                #region Subtract with Carry Immediate
                 self.regA = self.sbc(self.regA, self.read())
                 self.cycles += 2
-                # </editor-fold>
+                #endregion
             case 0xEA:
-                # <editor-fold desc="No Operation">
+                #region No Operation
                 self.cycles += 2; return
-                # </editor-fold>
+                #endregion
             case 0xEC:
-                # <editor-fold desc="Compare with X Register Absolute">
+                #region Compare with X Register Absolute
                 addr = self.get_abs()
                 self.cmp(self.regX, self.read(addr))
                 self.cycles += 4
-                # </editor-fold>
+                #endregion
             case 0xED:
-                # <editor-fold desc="Subtract with Carry Absolute">
+                #region Subtract with Carry Absolute
                 addr = self.get_abs()
                 self.regA = self.sbc(self.regA, self.read(addr))
                 self.cycles += 4
-                # </editor-fold>
+                #endregion
             case 0xEE:
-                # <editor-fold desc="Increment Memory Absolute">
+                #region Increment Memory Absolute
                 addr = self.get_abs()
                 self.write(addr, self.inc(self.read(addr)))
                 self.cycles += 6
-                # </editor-fold>
+                #endregion
             case 0xF0:
-                # <editor-fold desc="Branch on Equal">
+                #region Branch on Equal
                 if self.flag_Zero:
                     signedval = signed8(self.read())
                     temppg = self.pgmctr
@@ -1172,48 +1193,48 @@ class Emulation:
                         self.cycles += 1  # Branch takes extra cycle if crossing page boundary
                     self.cycles += 1  # Takes 1 additional cycles if nonzero
                 self.cycles += 2  # Takes 2 cycles no matter what
-                # </editor-fold>
+                #endregion
             case 0xF1:
-                # <editor-fold desc="Subtract with Carry Indirect, Y Indexed (Exclusive Indirect)">
+                #region Subtract with Carry Indirect, Y Indexed (Exclusive Indirect)
                 addr, addcycle = self.get_excl_indr()
                 self.regA = self.sbc(self.regA, self.read(addr))
                 self.cycles += 5 + addcycle
-                # </editor-fold>
+                #endregion
             case 0xF5:
-                # <editor-fold desc="Subtract with Carry Zero Page, X Indexed">
+                #region Subtract with Carry Zero Page, X Indexed
                 addr = (self.read() + self.regX) % 256
                 self.regA = self.sbc(self.regA, self.read(addr))
                 self.cycles += 4
-                # </editor-fold>
+                #endregion
             case 0xF6:
-                # <editor-fold desc="Increment Memory Zero Page, X Indexed">
+                #region Increment Memory Zero Page, X Indexed
                 addr = (self.read() + self.regX) % 256
                 self.write(addr, self.inc(self.read(addr)))
                 self.cycles += 6
-                # </editor-fold>
+                #endregion
             case 0xF8:
-                # <editor-fold desc="Set Decimal Flag -- Not Used">
+                #region Set Decimal Flag -- Not Used
                 self.flag_Decimal = True; self.cycles = 2
                 return
-                # </editor-fold>
+                #endregion
             case 0xF9:
-                # <editor-fold desc="Subtract with Carry Absolute, Y Indexed">
+                #region Subtract with Carry Absolute, Y Indexed
                 addr = self.get_abs_indx(self.get_abs(), self.regY)
                 self.regA = self.sbc(self.regA, self.read(addr))
                 self.cycles += 4
-                # </editor-fold>
+                #endregion
             case 0xFD:
-                # <editor-fold desc="Subtract with Carry Absolute, X Indexed">
+                #region Subtract with Carry Absolute, X Indexed
                 addr = self.get_abs_indx(self.get_abs(), self.regX)
                 self.regA = self.sbc(self.regA, self.read(addr))
                 self.cycles += 4
-                # </editor-fold>
+                #endregion
             case 0xFE:
-                # <editor-fold desc="Increment Memory Absolute, X Indexed">
+                #region Increment Memory Absolute, X Indexed
                 addr = self.get_abs() + self.regX
                 self.write(addr, self.inc(self.read(addr)))
                 self.cycles += 7 # No additional cycles for crossing page boundary
-                # </editor-fold>
+                #endregion
             case _:
                 print(hex(self.opcode) + " not implemented")
                 self.halt = True
@@ -1224,5 +1245,6 @@ class Emulation:
 # TODO: Check if I can simplify ADC/SBC to not take RegA as an argument, as well as get_abs_inx taking get_abs as an arg
 # TODO: Function to shorten length of branch instructions?
 # TODO: Implement Overflow of 16 bit addresses, double check 8 bits are also handled correctly
-
+# TODO: All standard arrays should be replaced with np arrays, especially arrays with more than one dimension, in these cases make sure to replace[x][y] with [x, y] as it is more efficient
+# TODO: np has custom data types for signed and unsigned, look into dropping the custom signed type for np
 

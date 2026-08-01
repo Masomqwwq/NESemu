@@ -1,17 +1,12 @@
-from bitarray import bitarray
+from timeit import timeit
+import numpy as np
+from bitarray import *
+from bitarray.util import int2ba, ba2int
 
-regPT = 0
-regPW = False
-tempvram = bitarray(0)
-def test(data):
-    if not regPW:
-        tempvram = bitarray(data*16)
-    else:
-        ppuaddr += data + tempvram
-        regPT = ppuaddr
-    print(regPT)
-    regPW != regPW
+test = np.uint8(255)
+print(test)
+test +=1
+print(test)
+test +=1 
+print(test)
 
-test(0x1001)
-test(0x0110)
-print(regPT)
