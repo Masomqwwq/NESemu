@@ -38,31 +38,32 @@ class Emulation:
         self.logger = []
         self.iter = 0
         self.oplookup = {}
-        # initialize ram ( I believe this will need to be randomized on startup in the future)
-        self.addSpace = np.zeros(0xFFFF, dtype=np.uint8)
-        # Initialize rom and append to addressable space
+        # initialize CPU Adressable space ( I believe ram will need to be randomized on startup in the future)
+        self.addSpace = np.zeros(0x10000, dtype=np.uint8)
+        # Initialize rom and insert
         tempread = []
         with open(self.rompath, "rb") as data:
             self.header = (chunk for chunk in data.read(0x10))
             tempread += (chunk for chunk in data.read())
-            self.addSpace[8001:] = np.array(tempread, dtype=np.uint8)
+            self.addSpace   [0x800:len(tempread)+0x800] = np.array(tempread, dtype=np.uint8)
         # Initalize PPU Addressable space then write CHR ROM to it
         self.vaddSpace = np.zeros(0x3FFF, dtype=np.uint8)
-        self.vaddSpace[:0x1FFF] = np.frombuffer(self.addSpace[0x10000:0x11FFF], dtype=np.uint8)
+        self.vaddSpace[0:0x1FFF] = self.addSpace[0x8800:0xA7FF]
+        print(list(map(lambda x: hex(x), self.vaddSpace[0:0x40])))
         # Move the Program Counter to correct space (Little Endian), or custom address if debug is active
         if pgmctr:
             self.pgmctr = pgmctr
         else:
-            self.pgmctr = self.addSpace[0xFFFC] + self.addSpace[0xFFFD] * 256
+            self.pgmctr = self.addSpace[0xFFFC] + np.uint16(self.addSpace[0xFFFD]) * 256
             self.makesprites()
 
     def makesprites(self):
         #TODO Convert to pg biteplanes instead of nested lists
-        chardata = self.vaddSPace[:0x1FFF]
+        chardata = self.vaddSpace[:0x2000]
         spritesheet = []
         # Ingest spritedate as 2 bitplanes, combine the bitmaps with bp2 having a value of 2 to give palette range between 0-3
-        for spritepointer in range(0, len(self.chardata), 16):
-            spritedata = self.chardata[spritepointer:spritepointer+16]
+        for spritepointer in range(0, len(chardata), 16):
+            spritedata = chardata[spritepointer:spritepointer+16]
             bp1 = list(map(lambda x: int2ba(x,8), spritedata[0:8]))
             bp2 = list(map(lambda x: int2ba(x,8), spritedata[8:16]))
             sprite = [list(map(lambda x: int2ba(x[0] + x[1]*2), zip(bp1[y], bp2[y]))) for y in range(8)]
@@ -327,7 +328,7 @@ class Emulation:
                 self.push(flags)
                 tlow = self.read(0xFFFE)
                 thigh = self.read(0xFFFF)
-                self.pgmctr = tlow + thigh * 256
+                self.pgmctr = tlow + np.uint16(thigh) * 256
                 self.cycles += 7
                 return
                 #endregion
