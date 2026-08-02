@@ -46,10 +46,9 @@ class Emulation:
             self.header = (chunk for chunk in data.read(0x10))
             tempread += (chunk for chunk in data.read())
             self.addSpace   [0x800:len(tempread)+0x800] = np.array(tempread, dtype=np.uint8)
-        # Initalize PPU Addressable space then write CHR ROM to it
+        # Initalize VRAM, Chardata, and palettedata tables
         self.vaddSpace = np.zeros(0x3FFF, dtype=np.uint8)
         self.vaddSpace[0:0x1FFF] = self.addSpace[0x8800:0xA7FF]
-        print(list(map(lambda x: hex(x), self.vaddSpace[0:0x40])))
         # Move the Program Counter to correct space (Little Endian), or custom address if debug is active
         if pgmctr:
             self.pgmctr = pgmctr
@@ -173,22 +172,32 @@ class Emulation:
                         ppuaddr = data*16
                     else:
                         ppuaddr += data
-                        regPT = ppuaddr
-                        regPV = ppuaddr
+                        self.regPT = ppuaddr
+                        self.regPV = ppuaddr
                     self.regPW = not self.regPW
                 case 0x2007:
-                    if regPV < 0x2000:
-                        # Write to Pattern Table if
+                    if self.regPV < 0x2000:
+                        # Write to Pattern Table if romheader[5] signifies that this action is allowed
                         if not self.header[5]:
-                            pass
-                            # I AM HERE, need to refactor the way I handle CHRData and sprite generation
-                        pass
-                    elif regPV < 0x3F00:
+                            self.vaddSpace[self.regPV] = data
+                        return
+                    elif self.regPV < 0x3F00:
                         # Write to Nametables
-                        pass
+                        if self.header[6] & 1 == 0:
+                            # Horizontal Mirroring
+                            self.vaddSpace[(self.regPV & 0x3FF) | (self.regPV & 0x800) >> 1 ] = data
+                        else:
+                            # Vertical Mirroring
+                            self.vaddSpace[self.regPV & 0x7FF] = data
                     else:
                         # Write to Palette RAM
-                        pass
+                        if self.regPV & 3 == 0:
+                            self.vaddSpace[self.regPV & 0x3F0F]
+                        else:
+                            self.vaddSpace[self.regPV & 0x3F1F]
+                    self.regPV += 32 if self.inc32 else 1
+                    
+                            
 
         else:
             raise MemoryError(f"Attemplted to reference out of scope address {address}")
